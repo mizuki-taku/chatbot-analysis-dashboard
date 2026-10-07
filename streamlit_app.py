@@ -335,72 +335,107 @@ col4.metric("期間", f"{df[COL_TIMESTAMP].min().strftime('%m/%d')} 〜 {df[COL_
 
 st.markdown("---")
 
+ANALYSIS_SYSTEM_PROMPT = """あなたは大学の授業担当教員を支援するアナリストです。授業用AIチャットボットのログ（学生が書いた質問・感想と、チャットボットが返した応答）を読み、教員が授業や指導の改善に使えるまとめを日本語で作成します。
+
+まとめは必ずログに書かれている内容だけを根拠にしてください。
+- 学生の質問・感想を示すときは、ログの文面をそのまま引用する。長い場合は「…」で省略してよいが、言い換えや創作はしない。
+- 応答の要約は、ログにあるチャットボットの実際の応答の要点をまとめたものにする。ログにない説明を自分で補ったり、より良い回答に書き換えたりしない。
+- 「多い」「目立つ」と書くのは、ログの中で実際に複数見られる場合だけにする。1件しかない内容は「〜という声もあった」のように書く。
+- 学生の氏名や学籍番号は書かない。"""
+
+
+def _format_log(df_target: pd.DataFrame) -> str:
+    """質問・感想と応答の組を、番号付きのレコードとして時系列順に並べる"""
+    records = []
+    for i, (query, response) in enumerate(zip(df_target[COL_QUERY], df_target[COL_RESPONSE]), start=1):
+        records.append(
+            f'<record id="{i}">\n'
+            f"<質問・感想>{query}</質問・感想>\n"
+            f"<応答>{response or '（応答なし）'}</応答>\n"
+            f"</record>"
+        )
+    return "\n".join(records)
+
+
+def _build_class_prompt(context: str, log: str) -> str:
+    return f"""以下は{context}と、それに対するチャットボットの応答です。
+
+<log>
+{log}
+</log>
+
+ログ全体に目を通し、次の構成でまとめてください。最初に、確認した件数と代表例の選び方を1〜2文で述べてください。
+
+## 1. 代表的な質問・感想と応答（10件）
+似た内容の質問・感想をまとめたうえで、代表的なものを10件選んでください（全体が10件に満たない場合はある分だけ）。
+- 繰り返し出てくる内容を優先しつつ、授業内容の理解でつまずいている点、演習やツール操作での困りごと、授業内容への感想・気づき、授業運営やチャットボット自体への質問・要望が、ログにある範囲でバランスよく入るようにする。
+- 同じ趣旨の質問・感想が複数あれば、1件にまとめて「」を並べてよい。
+- 次の列の表にする。応答の要約は、実際の応答の要点（手順・判断基準・用語の説明など具体的な中身）を2〜3文の「だ・である」調でまとめる。励ましや前置き、末尾の問いかけは要約に含めない。
+
+| No. | 代表的な質問・感想 | 応答の要約 |
+|---|---|---|
+
+## 2. 全体的な傾向
+学生の質問・感想に繰り返し現れるテーマを3〜5個、番号付きで挙げてください。各テーマは太字の見出しと、学生が実際にどう書いているかを踏まえた1〜2文の説明にします。理解が難しいと感じられている点と、肯定的な感想の両方に触れてください。
+
+## 3. チャットボットの応答について
+応答の長さ、形式、末尾での問いかけ、授業運営に関する質問（出席・提出方法など）への答え方など、ログの応答から読み取れる特徴と改善点を2〜3点挙げてください。
+
+## 4. 授業改善への示唆
+分析結果をもとに、先生へのアドバイスを1〜2点挙げてください。"""
+
+
+def _build_student_prompt(context: str, log: str) -> str:
+    return f"""以下は{context}と、それに対するチャットボットの応答です。
+
+<log>
+{log}
+</log>
+
+次の4点をまとめてください。
+
+## 1. この学生の主な関心テーマ
+どんなトピックに関心を持っているかを箇条書きで。
+
+## 2. 理解が不足していそうな部分
+繰り返し質問している内容や混乱が見られる概念を、該当する質問・感想を引用しながら指摘してください。見られなければ「特に見られない」と書いてください。
+
+## 3. 学習の傾向
+質問・感想の深さや種類から見える学習の様子を2〜3文でまとめてください。
+
+## 4. この学生へのサポート提案
+チャットボットの応答だけでは解決していなさそうな点を踏まえ、先生が取れるアドバイスや支援を1〜2点挙げてください。"""
+
+
 def _run_ai_analysis(df_target, class_name, student_name, date_label):
-    queries = df_target[COL_QUERY].dropna().tolist()
-    if not queries:
+    df_target = df_target.dropna(subset=[COL_QUERY]).sort_values(COL_TIMESTAMP)
+    if df_target.empty:
         st.warning("分析対象のデータがありません")
         return
+    n = len(df_target)
 
     # 分析対象の説明文を組み立て
     if student_name != "全員":
-        context = f"「{class_name}」の{student_name}さんの質問・感想（{len(queries)}件）"
+        context = f"「{class_name}」の{student_name}さんの質問・感想（{n}件）"
     elif date_label and date_label != "全期間":
-        context = f"「{class_name}」（期間：{date_label}）の全学生の質問・感想（{len(queries)}件）"
+        context = f"「{class_name}」（期間：{date_label}）の全学生の質問・感想（{n}件）"
     else:
-        context = f"「{class_name}」全期間の全学生の質問・感想（{len(queries)}件）"
+        context = f"「{class_name}」全期間の全学生の質問・感想（{n}件）"
 
     with st.spinner("Claudeが分析中...少し待ってください"):
         try:
             ai_client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
-            combined = "\n".join([f"- {q}" for q in queries])
+            log = _format_log(df_target)
 
             if student_name != "全員":
-                prompt = f"""以下は大学の授業{context}です。
-
-{combined}
-
-以下の4点を日本語で分析してください：
-
-## 1. この学生の主な関心テーマ
-どんなトピックに興味を持っているか箇条書きで。
-
-## 2. 理解が不足していそうな部分
-繰り返し質問している内容や混乱が見られる概念を指摘してください。
-
-## 3. 学習の傾向
-質問の深さ・種類から見えるこの学生の学習スタイルを2〜3文でまとめてください。
-
-## 4. この学生へのサポート提案
-先生がこの学生に対して取れるアドバイスや支援を1〜2点挙げてください。"""
+                prompt = _build_student_prompt(context, log)
             else:
-                prompt = f"""以下は大学の授業{context}です。
-
-{combined}
-
-以下の5点を日本語で分析してください：
-
-## 1. 主要なテーマ（3〜5個）
-学生が最も関心を持っているトピックを箇条書きで。
-
-## 2. 理解が不足していそうな部分
-繰り返し質問されている内容や、混乱が見られる概念を指摘してください。
-
-## 3. 全体的な関心の傾向
-学生の興味・関心の特徴を2〜3文でまとめてください。
-
-## 4. 授業改善への提案
-分析結果をもとに、先生へのアドバイスを1〜2点挙げてください。
-
-## 5. 代表的な質問とAIの回答（10件）
-学生にとって特に有益と思われる質問と回答のペアを10件選び、以下の形式で示してください。
-Q: （質問内容）
-A: （回答内容・なければ簡潔に補足回答）
----
-（10件繰り返し）"""
+                prompt = _build_class_prompt(context, log)
 
             response = ai_client.messages.create(
                 model="claude-sonnet-5",
                 max_tokens=16000,  # 思考（thinking）分のトークンも含むため余裕を持たせる
+                system=ANALYSIS_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": prompt}]
             )
             # Sonnet 5 は思考ブロック（ThinkingBlock）を先頭に返すため、テキストブロックだけを取り出す
@@ -517,7 +552,7 @@ with tab2:
 # ─────── Tab3: AI分析 ───────
 with tab3:
     st.subheader("🤖 AIによる内容分析")
-    st.caption("Claudeが質問・感想の傾向を分析します（APIコストがかかるため必要なときだけ実行してください）")
+    st.caption("Claudeが質問・感想とチャットボットの応答を読み、傾向をまとめます（APIコストがかかるため必要なときだけ実行してください）")
 
     # 現在の分析対象を明示
     if selected_student != "全員":
