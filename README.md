@@ -20,7 +20,7 @@
 - `表示` は任意です。`FALSE`・`非表示`・`0` と書いた行はダッシュボードに出ません。
 - ダッシュボードでは、最新の年度の最後の学期が最初に選ばれます。
 
-[registry_template.csv](registry_template.csv) は、2026年度後期の3授業を登録したひな形です。
+[registry_template.csv](registry_template.csv) は、2026年度前期の2授業と後期の3授業を登録したひな形です。
 Google Sheets にインポートし、スプレッドシートURLの列を各シートのURLに差し替えて使えます。
 
 ### 新しい学期・科目を追加するとき
